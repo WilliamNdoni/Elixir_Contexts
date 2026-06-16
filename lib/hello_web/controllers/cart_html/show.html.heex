@@ -1,7 +1,11 @@
 <Layouts.app flash={@flash}>
   <.header>
     My Cart
-    <:subtitle :if={@cart.items == []}>Your cart is empty</:subtitle>
+    <:actions>
+     <.button href={~p"/orders"} method="post">
+       Complete order
+     </.button>
+    </:actions>
   </.header>
 
   <div :if={@cart.items !== []}>
