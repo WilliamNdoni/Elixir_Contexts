@@ -6,8 +6,10 @@ defmodule Hello.ShoppingCart do
   import Ecto.Query, warn: false
   alias Hello.Repo
 
-  alias Hello.ShoppingCart.Cart
+  alias Hello.Catalog
+  alias Hello.ShoppingCart.{Cart, CartItem}
   alias Hello.Accounts.Scope
+
 
   @doc """
   Subscribes to scoped notifications about any cart changes.
@@ -58,8 +60,16 @@ defmodule Hello.ShoppingCart do
       ** (Ecto.NoResultsError)
 
   """
-  def get_cart!(%Scope{} = scope, id) do
-    Repo.get_by!(Cart, id: id, user_id: scope.user.id)
+  def get_cart(%Scope{} = scope) do
+    Repo.one(
+      from(c in Cart,
+        where: c.user_id == ^scope.user.id,
+        left_join: i in assoc(c, :items),
+        left_join: p in assoc(i, :product),
+        order_by: [asc: i.inserted_at],
+        preload: [items: {i, product: p}]
+      )
+    )
   end
 
   @doc """
@@ -80,8 +90,48 @@ defmodule Hello.ShoppingCart do
            |> Cart.changeset(attrs, scope)
            |> Repo.insert() do
       broadcast_cart(scope, {:created, cart})
-      {:ok, cart}
+      {:ok, get_cart(scope)}
     end
+  end
+
+  def add_item_to_cart(%Scope{} = scope, %Cart{} = cart, product_id) do
+    true = cart.user_id == scope.user.id
+    product = Catalog.get_product!(product_id)
+
+    %CartItem{quantity: 1, price_when_carted: product.price}
+    |> CartItem.changeset(%{})
+    |> Ecto.Changeset.put_assoc(:cart, cart)
+    |> Ecto.Changeset.put_assoc(:product, product)
+    |> Repo.insert(
+      on_conflict: [inc: [quantity: 1]],
+      conflict_target: [:cart_id, :product_id]
+    )
+  end
+
+  def remove_item_from_cart(%Scope{} = scope, %Cart{} = cart, product_id) do
+    true = cart.user_id == scope.user.id
+
+    {1, _} =
+      Repo.delete_all(
+        from(i in CartItem,
+          where: i.cart_id == ^cart.id,
+          where: i.product_id == ^product_id
+        )
+      )
+
+    {:ok, get_cart(scope)}
+  end
+
+    def total_item_price(%CartItem{} = item) do
+    Decimal.mult(item.product.price, item.quantity)
+  end
+
+  def total_cart_price(%Cart{} = cart) do
+    Enum.reduce(cart.items, 0, fn item, acc ->
+      item
+      |> total_item_price()
+      |> Decimal.add(acc)
+    end)
   end
 
   @doc """
@@ -99,12 +149,24 @@ defmodule Hello.ShoppingCart do
   def update_cart(%Scope{} = scope, %Cart{} = cart, attrs) do
     true = cart.user_id == scope.user.id
 
-    with {:ok, cart = %Cart{}} <-
-           cart
-           |> Cart.changeset(attrs, scope)
-           |> Repo.update() do
-      broadcast_cart(scope, {:updated, cart})
-      {:ok, cart}
+    changeset =
+      cart
+      |> Cart.changeset(attrs, scope)
+      |> Ecto.Changeset.cast_assoc(:items, with: &CartItem.changeset/2)
+
+    Repo.transact(fn ->
+      with {:ok, cart} <- Repo.update(changeset),
+           {_count, _cart_items} = Repo.delete_all(from(i in CartItem, where: i.cart_id == ^cart.id and i.quantity == 0)) do
+        {:ok, cart}
+      end
+    end)
+    |> case do
+      {:ok, cart} ->
+        broadcast_cart(scope, {:updated, cart})
+        {:ok, cart}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

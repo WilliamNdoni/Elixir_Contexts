@@ -11,7 +11,21 @@ defmodule HelloWeb.Router do
     plug :protect_from_forgery
     plug :put_secure_browser_headers
     plug :fetch_current_scope_for_user
+    plug :fetch_current_cart
   end
+
+  alias Hello.ShoppingCart
+  defp fetch_current_cart(%{assigns: %{current_scope: scope}} = conn, _opts) when not is_nil(scope) do
+    if cart = ShoppingCart.get_cart(scope) do
+      assign(conn, :cart, cart)
+    else
+      {:ok, new_cart} = ShoppingCart.create_cart(scope, %{})
+      assign(conn, :cart, new_cart)
+    end
+  end
+
+  defp fetch_current_cart(conn, _opts), do: conn
+
 
   pipeline :api do
     plug :accepts, ["json"]
@@ -21,9 +35,17 @@ defmodule HelloWeb.Router do
     pipe_through :browser
 
     get "/", PageController, :home
-    resources "/products", ProductController 
+    resources "/products", ProductController
   end
 
+  scope "/", HelloWeb do
+    pipe_through [:browser, :require_authenticated_user]
+
+    resources "/cart_items", CartItemController, only: [:create, :delete]
+
+    get "/cart", CartController, :show
+    put "/cart", CartController, :update
+  end
   # Other scopes may use custom stacks.
   # scope "/api", HelloWeb do
   #   pipe_through :api
